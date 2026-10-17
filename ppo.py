@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
+import numpy as np
 
 
+# Actor network
 class Actor(nn.Module):
 
     def __init__(self, observation_size, action_size, hidden_size=64):
@@ -21,7 +23,7 @@ class Actor(nn.Module):
 
         return logits
 
-
+# Critic network
 class Critic(nn.Module):
 
     def __init__(self, observation_size, hidden_size=64):
@@ -43,6 +45,33 @@ class Critic(nn.Module):
         value = value.squeeze(-1)
 
         return value
+
+# Continuous actor network for continuous action spaces
+class ContinuousActor(nn.Module):
+
+    def __init__(self, observation_size, action_size, hidden_size=64):
+        super().__init__()
+
+        self.network = nn.Sequential(
+            nn.Linear(observation_size, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, action_size)
+        )
+
+        # Learn log standard deviation so the standard deviation stays positive
+        self.log_std = nn.Parameter(
+            torch.zeros(action_size)
+        )
+
+    def forward(self, observation):
+
+        mean = self.network(observation)
+
+        std = torch.exp(self.log_std)
+
+        return mean, std
 
 def collect_rollout(env, actor, critic, observation, num_steps):
     """
@@ -119,8 +148,6 @@ def collect_rollout(env, actor, critic, observation, num_steps):
     }
 
     return rollout, observation
-
-
 
 
 def compute_gae(rollout, gamma, gae_lambda):
@@ -202,10 +229,12 @@ def compute_ppo_losses(
     # Re-evaluate the stored actions using the current policy
     logits = actor(states)
 
+    # The current policy is used to compute the new log-probabilities of the actions taken in the rollout.
     action_distribution = torch.distributions.Categorical(
         logits=logits
     )
 
+    # The new log-probabilities of the actions taken in the rollout, under the current policy, are computed.
     new_log_probs = action_distribution.log_prob(actions)
 
     # PPO probability ratio
@@ -304,6 +333,258 @@ def update_ppo(
             # The current policy changes after each optimiser step,
             # while old_log_probs remain fixed for the entire update
             results = compute_ppo_losses(
+                actor,
+                critic,
+                minibatch_rollout,
+                minibatch_advantages,
+                minibatch_returns,
+                clip_epsilon
+            )
+
+            # Maximise the clipped PPO objective and the policy entropy, while minimising the critic loss
+            # PyTorch minimises losses, so we negate the policy objective and entropy
+            # The entropy term encourages exploration by penalising low-entropy policies
+            actor_loss = (
+                results["policy_loss"]
+                - entropy_coefficient * results["entropy"]
+            )
+
+            # Critic is trained separately against the lambda-return targets, which are fixed
+            critic_loss = results["value_loss"]
+
+            # Update the actor
+            actor_optimizer.zero_grad()
+            actor_loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(actor.parameters(), max_grad_norm)
+            actor_optimizer.step()
+
+            # Update the critic 
+            critic_optimizer.zero_grad()
+            critic_loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(critic.parameters(), max_grad_norm)
+            critic_optimizer.step()
+
+
+def collect_continuous_rollout(
+    env,
+    actor,
+    critic,
+    observation,
+    num_steps
+):
+
+    states = []
+    actions = []
+    rewards = []
+    old_log_probs = []
+    values = []
+    next_values = []
+    terminateds = []
+    truncateds = []
+
+    with torch.no_grad():
+
+        for step in range(num_steps):
+
+            observation_tensor = torch.as_tensor(
+                observation,
+                dtype=torch.float32
+            )
+            observation_tensor = observation_tensor.unsqueeze(0)
+
+            mean, std = actor(observation_tensor)
+
+            action_distribution = torch.distributions.Normal(
+                mean,
+                std
+            )
+
+            action_tensor = action_distribution.sample()
+
+            old_log_prob = action_distribution.log_prob(
+                action_tensor
+            )
+            old_log_prob = old_log_prob.sum(dim=-1)
+
+            value = critic(observation_tensor)
+
+            # Keep the raw sample for PPO.
+            raw_action = action_tensor.squeeze(0)
+
+            # Only the copy passed to the environment is bounded.
+            action_for_env = raw_action.numpy()
+            action_for_env = np.clip(
+                action_for_env,
+                env.action_space.low,
+                env.action_space.high
+            )
+
+            next_observation, reward, terminated, truncated, info = env.step(
+                action_for_env
+            )
+
+            next_observation_tensor = torch.as_tensor(
+                next_observation,
+                dtype=torch.float32
+            )
+            next_observation_tensor = next_observation_tensor.unsqueeze(0)
+
+            next_value = critic(next_observation_tensor)
+
+            states.append(observation_tensor.squeeze(0))
+            actions.append(raw_action)
+            rewards.append(reward)
+            old_log_probs.append(old_log_prob.squeeze(0))
+            values.append(value.squeeze(0))
+            next_values.append(next_value.squeeze(0))
+            terminateds.append(terminated)
+            truncateds.append(truncated)
+
+            if terminated or truncated:
+                next_observation, info = env.reset()
+
+            observation = next_observation
+
+    rollout = {
+        "states": torch.stack(states),
+        "actions": torch.stack(actions),
+        "rewards": torch.as_tensor(rewards, dtype=torch.float32),
+        "old_log_probs": torch.stack(old_log_probs),
+        "values": torch.stack(values),
+        "next_values": torch.stack(next_values),
+        "terminateds": torch.as_tensor(
+            terminateds,
+            dtype=torch.float32
+        ),
+        "truncateds": torch.as_tensor(
+            truncateds,
+            dtype=torch.float32
+        ),
+    }
+
+    return rollout, observation
+
+
+def compute_continuous_ppo_losses(
+    actor,
+    critic,
+    rollout,
+    advantages,
+    returns,
+    clip_epsilon
+):
+
+    states = rollout["states"]
+    actions = rollout["actions"]
+    old_log_probs = rollout["old_log_probs"]
+
+    mean, std = actor(states)
+
+    action_distribution = torch.distributions.Normal(
+        mean,
+        std
+    )
+
+    new_log_probs = action_distribution.log_prob(
+        actions
+    )
+    new_log_probs = new_log_probs.sum(dim=-1)
+
+    log_ratio = new_log_probs - old_log_probs
+    ratios = torch.exp(log_ratio)
+
+    unclipped_objective = ratios * advantages
+
+    clipped_ratios = torch.clamp(
+        ratios,
+        1.0 - clip_epsilon,
+        1.0 + clip_epsilon
+    )
+
+    clipped_objective = clipped_ratios * advantages
+
+    policy_objective = torch.minimum(
+        unclipped_objective,
+        clipped_objective
+    )
+
+    policy_loss = -policy_objective.mean()
+
+    new_values = critic(states)
+
+    value_loss = 0.5 * (
+        (new_values - returns) ** 2
+    ).mean()
+
+    entropy_per_dimension = action_distribution.entropy()
+
+    entropy = entropy_per_dimension.sum(
+        dim=-1
+    ).mean()
+
+    results = {
+        "policy_loss": policy_loss,
+        "value_loss": value_loss,
+        "entropy": entropy,
+        "ratios": ratios,
+        "new_log_probs": new_log_probs,
+        "new_values": new_values,
+        "unclipped_objective": unclipped_objective,
+        "clipped_objective": clipped_objective
+    }
+
+    return results
+
+def update_continuous_ppo(
+    actor,
+    critic,
+    actor_optimizer,
+    critic_optimizer,
+    rollout,
+    advantages,
+    returns,
+    clip_epsilon,
+    entropy_coefficient,
+    update_epochs,
+    minibatch_size,
+    max_grad_norm
+):
+
+    num_steps = rollout["states"].shape[0]
+
+    # Reuse the same rollout for several PPO epochs
+    for epoch in range(update_epochs):
+
+        # Randomly shuffle the rollout indices at the start of each epoch to create minibatches
+        indices = torch.randperm(num_steps)
+
+        # Split the rollout into minibatches
+        for start in range(0, num_steps, minibatch_size):
+
+            # Select a minibatch of rollout data
+            end = min(start + minibatch_size, num_steps)
+            minibatch_indices = indices[start:end]
+
+            # Select the transitions corresponding to the minibatch indices
+            # old_log_probs remain the probabilities of the actions taken under the old policy, 
+            # which are fixed for the PPO ratio
+            minibatch_rollout = {
+                "states": rollout["states"][minibatch_indices],
+                "actions": rollout["actions"][minibatch_indices],
+                "old_log_probs": rollout["old_log_probs"][minibatch_indices]
+            }
+
+            # Advantages and critic targets were calculated from the 
+            # original rollout and remain fixed for all PPO epochs
+            minibatch_advantages = advantages[minibatch_indices]
+            minibatch_returns = returns[minibatch_indices]
+
+            # Recalculate the PPO losses for the minibatch using the current actor and critic
+            # The current policy changes after each optimiser step,
+            # while old_log_probs remain fixed for the entire update
+            results = compute_continuous_ppo_losses(
                 actor,
                 critic,
                 minibatch_rollout,
