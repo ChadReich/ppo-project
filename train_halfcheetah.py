@@ -141,7 +141,7 @@ num_steps = 256
 minibatch_size = 64
 update_epochs = 4
 
-total_timesteps = 10_000
+total_timesteps = 50_000
 evaluation_episodes = 5
 evaluation_frequency = 10
 
@@ -198,6 +198,15 @@ for update in range(num_updates):
         observation,
         num_steps
     )
+
+    if update == 0:
+
+        print()
+        print("First HalfCheetah rollout shapes")
+        print("Actions:", rollout["actions"].shape)
+        print("Old log-probs:", rollout["old_log_probs"].shape)
+        print("Values:", rollout["values"].shape)
+        print("Next values:", rollout["next_values"].shape)
 
     # Calculate advantages and critic targets from this rollout
     advantages, returns = compute_gae(
