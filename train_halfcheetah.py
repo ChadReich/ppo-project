@@ -1,7 +1,6 @@
 import random
 
 import gymnasium as gym
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -90,7 +89,6 @@ def evaluate_policy(
 # Reproducibility
 seed = 42
 evaluation_seed = 1000
-
 random.seed(seed)
 np.random.seed(seed)
 torch.manual_seed(seed)
@@ -117,7 +115,6 @@ print("Observation size:", observation_size)
 print("Action size:", action_size)
 
 # Actor and critic
-
 actor = ContinuousActor(
     observation_size,
     action_size
@@ -141,13 +138,12 @@ num_steps = 256
 minibatch_size = 64
 update_epochs = 4
 
-total_timesteps = 50_000
+total_timesteps = 49_152
 evaluation_episodes = 5
-evaluation_frequency = 10
+evaluation_frequency = 4096
 
 
 # Optimisers
-
 actor_optimizer = torch.optim.Adam(
     actor.parameters(),
     lr=learning_rate
@@ -176,10 +172,7 @@ initial_mean_return = evaluate_policy(
 )
 
 print()
-print(
-    "Initial mean return:",
-    initial_mean_return
-)
+print("Initial mean return:", initial_mean_return)
 
 
 # Store evaluation results for the learning curve
@@ -242,7 +235,7 @@ for update in range(num_updates):
 
     # Periodically check whether the policy is improving
     if (
-        (update + 1) % evaluation_frequency == 0
+        timesteps_completed % evaluation_frequency == 0
         or update == num_updates - 1
     ):
 
@@ -262,15 +255,11 @@ for update in range(num_updates):
         )
 
         print()
-        print(
-            "Timesteps:",
-            timesteps_completed
-        )
-
-        print(
-            "Mean return:",
-            mean_return
-        )
+        print("Timesteps:", timesteps_completed)
+        print("Mean return:", mean_return)
+print()
+print("Evaluation steps:", evaluation_timesteps)
+print("Evaluation mean returns:", evaluation_returns)
 
 
 env.close()
