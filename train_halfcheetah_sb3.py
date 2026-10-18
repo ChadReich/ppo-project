@@ -22,7 +22,7 @@ eval_env = gym.make(env_id)
 # Create the SB3 PPO model
 model = PPO("MlpPolicy", env, seed=seed, verbose=1)
 
-# Create a matched evaluation function using the public SB3 API
+# Create a matched evaluation function using the public SB3 API that evaluates the model
 def evaluate_model(model, env, evaluation_seed, num_episodes=5):
     episode_returns = []
 
@@ -52,16 +52,26 @@ def evaluate_model(model, env, evaluation_seed, num_episodes=5):
 # Evaluate the untrained model
 initial_evaluation_mean = evaluate_model(model, eval_env, evaluation_seed, num_episodes=5)
 
-# Train the model
-model.learn(total_timesteps=49_152)
+# Train in fixed blocks and store periodic evaluation results for the learning curve.
+total_timesteps = 49_152
+evaluation_frequency = 4096
+num_evaluation_episodes = 5
 
-# Evaluate the trained model
-trained_evaluation_mean = evaluate_model(model, eval_env, evaluation_seed, num_episodes=5)
+evaluation_means = [initial_evaluation_mean]
+evaluation_steps = [0]
+
+for step in range(0, total_timesteps, evaluation_frequency):
+    model.learn(total_timesteps=evaluation_frequency, reset_num_timesteps=False)
+
+    # Evaluate the model after training
+    mean_return = evaluate_model(model, eval_env, evaluation_seed, num_episodes=num_evaluation_episodes)
+    evaluation_means.append(mean_return)
+    evaluation_steps.append(model.num_timesteps)
+
 
 print("Initial evaluation results (mean return):", initial_evaluation_mean)
-print("Trained evaluation results (mean return):", trained_evaluation_mean)
-
-
+print("Evaluation steps:", evaluation_steps)
+print("Evaluation mean returns:", evaluation_means)
 
 # Close the environments
 env.close()
