@@ -1,3 +1,5 @@
+import csv
+import os
 import random
 
 import gymnasium as gym
@@ -10,7 +12,8 @@ from ppo import (
     collect_continuous_rollout,
     compute_gae,
     normalise_advantages,
-    update_continuous_ppo
+    update_continuous_ppo,
+    explained_variance
 )
 
 
@@ -24,8 +27,7 @@ def evaluate_policy(
     Evaluate the current policy without changing the actor.
 
     The Gaussian mean is used as the deterministic action so that
-    repeated evaluations are easier to compare during this initial
-    HalfCheetah learning check.
+    policy performance can be compared consistently across checkpoints.
     """
 
     env = gym.make(env_id)
@@ -79,187 +81,337 @@ def evaluate_policy(
 
     env.close()
 
-    mean_return = np.mean(
-        episode_returns
+    mean_return = float(
+        np.mean(episode_returns)
     )
 
     return mean_return
 
 
-# Reproducibility
-seed = 42
-evaluation_seed = 1000
-random.seed(seed)
-np.random.seed(seed)
-torch.manual_seed(seed)
+def save_results(
+    results,
+    filename
+):
+    """
+    Save evaluation results to a CSV file.
+    """
 
+    os.makedirs(
+        "results",
+        exist_ok=True
+    )
 
-# Environment
+    filepath = os.path.join(
+        "results",
+        filename
+    )
+
+    fieldnames = [
+        "environment",
+        "implementation",
+        "training_seed",
+        "timestep",
+        "mean_return"
+    ]
+
+    with open(
+        filepath,
+        "w",
+        newline=""
+    ) as csv_file:
+
+        writer = csv.DictWriter(
+            csv_file,
+            fieldnames=fieldnames
+        )
+
+        writer.writeheader()
+
+        writer.writerows(
+            results
+        )
+
+def save_diagnostics(
+    diagnostics,
+    filename
+):
+    """
+    Save PPO diagnostic results to a CSV file.
+    """
+
+    os.makedirs(
+        "results",
+        exist_ok=True
+    )
+
+    filepath = os.path.join(
+        "results",
+        filename
+    )
+
+    fieldnames = [
+        "environment",
+        "implementation",
+        "training_seed",
+        "update",
+        "timestep",
+        "explained_variance",
+        "approx_kl",
+        "clip_fraction",
+        "policy_std"
+    ]
+
+    with open(
+        filepath,
+        "w",
+        newline=""
+    ) as csv_file:
+
+        writer = csv.DictWriter(
+            csv_file,
+            fieldnames=fieldnames
+        )
+
+        writer.writeheader()
+
+        writer.writerows(
+            diagnostics
+        )
+
+# Experimental settings
+
 env_id = "HalfCheetah-v5"
 
-env = gym.make(
-    env_id
-)
+training_seeds = [0, 1, 2, 3, 4]
 
-observation, info = env.reset(
-    seed=seed
-)
+evaluation_seed = 1000
+evaluation_episodes = 5
 
-env.action_space.seed(
-    seed
-)
-
-observation_size = env.observation_space.shape[0]
-action_size = env.action_space.shape[0]
-print("Observation size:", observation_size)
-print("Action size:", action_size)
-
-# Actor and critic
-actor = ContinuousActor(
-    observation_size,
-    action_size
-)
-
-critic = Critic(
-    observation_size
-)
-
-
-# PPO settings
 gamma = 0.99
 gae_lambda = 0.95
 clip_epsilon = 0.2
 
 learning_rate = 3e-4
-entropy_coefficient = 0.01
+entropy_coefficient = 0.0
 max_grad_norm = 0.5
 
-num_steps = 256
+num_steps = 2048
 minibatch_size = 64
-update_epochs = 4
+update_epochs = 10
 
-total_timesteps = 49_152
-evaluation_episodes = 5
-evaluation_frequency = 4096
-
-
-# Optimisers
-actor_optimizer = torch.optim.Adam(
-    actor.parameters(),
-    lr=learning_rate
-)
-
-critic_optimizer = torch.optim.Adam(
-    critic.parameters(),
-    lr=learning_rate
-)
+total_timesteps = 999_424
+evaluation_frequency = 16_384
 
 
-# Number of complete rollout-update cycles
-num_updates = total_timesteps // num_steps
-actual_training_steps = num_updates * num_steps
-
-print("Number of PPO updates:", num_updates)
-print("Actual training steps:", actual_training_steps)
+# Store results from every training seed
+all_results = []
+all_diagnostics = []
 
 
-# Evaluate the untrained policy before learning
-initial_mean_return = evaluate_policy(
-    env_id,
-    actor,
-    evaluation_seed,
-    evaluation_episodes
-)
+# Run each training seed
 
-print()
-print("Initial mean return:", initial_mean_return)
+for seed in training_seeds:
 
+    print()
+    print("-" * 60)
+    print("Training seed:", seed)
+    print("-" * 60)
 
-# Store evaluation results for the learning curve
-evaluation_timesteps = [0]
-evaluation_returns = [initial_mean_return]
+    # Reproducibility
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
+    # Environment
+    env = gym.make(
+        env_id
+    )
 
-# Training
-for update in range(num_updates):
+    observation, info = env.reset(
+        seed=seed
+    )
 
-    # Collect fresh experience using the current policy
-    rollout, observation = collect_continuous_rollout(
-        env,
+    env.action_space.seed(
+        seed
+    )
+
+    observation_size = env.observation_space.shape[0]
+    action_size = env.action_space.shape[0]
+
+    print("Observation size:", observation_size)
+    print("Action size:", action_size)
+
+    # Actor and critic
+    actor = ContinuousActor(
+        observation_size,
+        action_size
+    )
+
+    critic = Critic(
+        observation_size
+    )
+
+    # Optimisers
+    actor_optimizer = torch.optim.Adam(
+        actor.parameters(),
+        lr=learning_rate
+    )
+
+    critic_optimizer = torch.optim.Adam(
+        critic.parameters(),
+        lr=learning_rate
+    )
+
+    # Number of complete rollout-update cycles
+    num_updates = total_timesteps // num_steps
+    actual_training_steps = num_updates * num_steps
+
+    print("Number of PPO updates:", num_updates)
+    print("Actual training steps:", actual_training_steps)
+
+    # Evaluate the untrained policy
+    initial_mean_return = evaluate_policy(
+        env_id,
         actor,
-        critic,
-        observation,
-        num_steps
+        evaluation_seed,
+        evaluation_episodes
     )
 
-    if update == 0:
+    print()
+    print("Initial mean return:", initial_mean_return)
 
-        print()
-        print("First HalfCheetah rollout shapes")
-        print("Actions:", rollout["actions"].shape)
-        print("Old log-probs:", rollout["old_log_probs"].shape)
-        print("Values:", rollout["values"].shape)
-        print("Next values:", rollout["next_values"].shape)
-
-    # Calculate advantages and critic targets from this rollout
-    advantages, returns = compute_gae(
-        rollout,
-        gamma,
-        gae_lambda
+    # Save timestep-zero evaluation
+    all_results.append(
+        {
+            "environment": env_id,
+            "implementation": "scratch",
+            "training_seed": seed,
+            "timestep": 0,
+            "mean_return": initial_mean_return
+        }
     )
 
-    # Normalise the advantages once before the PPO updates
-    normalised_advantages = normalise_advantages(
-        advantages
-    )
 
-    # Reuse this rollout for several PPO epochs
-    update_continuous_ppo(
-        actor,
-        critic,
-        actor_optimizer,
-        critic_optimizer,
-        rollout,
-        normalised_advantages,
-        returns,
-        clip_epsilon,
-        entropy_coefficient,
-        update_epochs,
-        minibatch_size,
-        max_grad_norm
-    )
+    # Training
+    for update in range(num_updates):
 
-    timesteps_completed = (
-        (update + 1) * num_steps
-    )
-
-    # Periodically check whether the policy is improving
-    if (
-        timesteps_completed % evaluation_frequency == 0
-        or update == num_updates - 1
-    ):
-
-        mean_return = evaluate_policy(
-            env_id,
+        # Collect fresh experience
+        rollout, observation = collect_continuous_rollout(
+            env,
             actor,
-            evaluation_seed,
-            evaluation_episodes
+            critic,
+            observation,
+            num_steps
         )
 
-        evaluation_timesteps.append(
-            timesteps_completed
+        if update == 0:
+
+            print()
+            print("-" * 60)
+            print("First HalfCheetah rollout shapes")
+            print("Actions:", rollout["actions"].shape)
+            print("Old log-probs:", rollout["old_log_probs"].shape)
+            print("Values:", rollout["values"].shape)
+            print("Next values:", rollout["next_values"].shape)
+
+        # Calculate advantages and critic targets
+        advantages, returns = compute_gae(
+            rollout,
+            gamma,
+            gae_lambda
         )
 
-        evaluation_returns.append(
-            mean_return
+        # Explained variance of the value function predictions
+        explained_variance_value = explained_variance(
+            returns,
+            rollout["values"]
         )
 
-        print()
-        print("Timesteps:", timesteps_completed)
-        print("Mean return:", mean_return)
+
+        # Normalise advantages
+        normalised_advantages = normalise_advantages(
+            advantages
+        )
+
+        # PPO update
+        mean_approx_kl, mean_clip_fraction, mean_policy_std = update_continuous_ppo(
+            actor,
+            critic,
+            actor_optimizer,
+            critic_optimizer,
+            rollout,
+            normalised_advantages,
+            returns,
+            clip_epsilon,
+            entropy_coefficient,
+            update_epochs,
+            minibatch_size,
+            max_grad_norm
+        )
+
+
+        timesteps_completed = (
+            (update + 1) * num_steps
+        )
+
+        # Store diagnostics for this update
+        all_diagnostics.append(
+            {
+                "environment": env_id,
+                "implementation": "scratch",
+                "training_seed": seed,
+                "update": update + 1,
+                "timestep": timesteps_completed,
+                "explained_variance": explained_variance_value,
+                "approx_kl": mean_approx_kl,
+                "clip_fraction": mean_clip_fraction,
+                "policy_std": mean_policy_std
+            }
+        )
+
+        # Periodic deterministic evaluation
+        if timesteps_completed % evaluation_frequency == 0:
+
+            mean_return = evaluate_policy(
+                env_id,
+                actor,
+                evaluation_seed,
+                evaluation_episodes
+            )
+
+            print()
+            print("Timesteps:", timesteps_completed)
+            print("Mean return:", mean_return)
+
+            all_results.append(
+                {
+                    "environment": env_id,
+                    "implementation": "scratch",
+                    "training_seed": seed,
+                    "timestep": timesteps_completed,
+                    "mean_return": mean_return
+                }
+            )
+
+    env.close()
+
+    # Save after every completed seed
+    save_results(
+        all_results,
+        "halfcheetah_scratch.csv"
+    )
+
+    save_diagnostics(
+        all_diagnostics,
+        "halfcheetah_scratch_diagnostics.csv"
+    )
+
+    print()
+    print("Finished seed:", seed)
+    print("Results saved.")
+
+
 print()
-print("Evaluation steps:", evaluation_timesteps)
-print("Evaluation mean returns:", evaluation_returns)
-
-
-env.close()
+print("-" * 60)
+print("All scratch PPO seeds complete.")
+print("-" * 60)

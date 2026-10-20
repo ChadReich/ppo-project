@@ -5,20 +5,23 @@ import numpy as np
 
 # Actor network
 class Actor(nn.Module):
+    '''
+    Actor network for discrete action spaces.
+    '''
 
     def __init__(self, observation_size, action_size, hidden_size=64):
         super().__init__()
-
+        # The actor network outputs the logits of a categorical distribution over actions.
         self.network = nn.Sequential(
-            nn.Linear(observation_size, hidden_size),
-            nn.Tanh(),
+            nn.Linear(observation_size, hidden_size), # First hidden layer
+            nn.Tanh(),                                # Activation function
             nn.Linear(hidden_size, hidden_size),
             nn.Tanh(),
-            nn.Linear(hidden_size, action_size)
+            nn.Linear(hidden_size, action_size)       # Output layer: logits for each action
         )
 
     def forward(self, observation):
-
+        # The forward pass computes the logits of the action distribution given an observation.
         logits = self.network(observation)
 
         return logits
@@ -30,15 +33,15 @@ class Critic(nn.Module):
         super().__init__()
 
         self.network = nn.Sequential(
-            nn.Linear(observation_size, hidden_size),
-            nn.Tanh(),
+            nn.Linear(observation_size, hidden_size), # First hidden layer
+            nn.Tanh(),                                # Activation function
             nn.Linear(hidden_size, hidden_size),
             nn.Tanh(),
-            nn.Linear(hidden_size, 1)
+            nn.Linear(hidden_size, 1)                 # Output layer: single value for the state
         )
 
     def forward(self, observation):
-
+        # The forward pass computes the value of a state given an observation.
         value = self.network(observation)
 
         # Remove the final size-1 dimension so values have shape [batch_size]
@@ -53,11 +56,11 @@ class ContinuousActor(nn.Module):
         super().__init__()
 
         self.network = nn.Sequential(
-            nn.Linear(observation_size, hidden_size),
-            nn.Tanh(),
+            nn.Linear(observation_size, hidden_size), # First hidden layer
+            nn.Tanh(),                                # Activation function
             nn.Linear(hidden_size, hidden_size),
             nn.Tanh(),
-            nn.Linear(hidden_size, action_size)
+            nn.Linear(hidden_size, action_size)       # Output layer: mean for each action
         )
 
         # Learn log standard deviation so the standard deviation stays positive
@@ -66,9 +69,10 @@ class ContinuousActor(nn.Module):
         )
 
     def forward(self, observation):
-
+        # The forward pass computes the mean and standard deviation of a Gaussian distribution over actions given an observation.
         mean = self.network(observation)
 
+        # The standard deviation is obtained by exponentiating the log standard deviation parameter to ensure positivity.
         std = torch.exp(self.log_std)
 
         return mean, std
@@ -96,17 +100,20 @@ def collect_rollout(env, actor, critic, observation, num_steps):
     with torch.no_grad():
 
         for step in range(num_steps):
-
+            # The current observation is converted to a tensor
             observation_tensor = torch.as_tensor(observation, dtype=torch.float32)
             observation_tensor = observation_tensor.unsqueeze(0)
 
+            # Logits of the action distribution are computed by the actor network
             logits = actor(observation_tensor)
             action_distribution = torch.distributions.Categorical(logits=logits)
 
+            # Sample an action from the distribution
             action_tensor = action_distribution.sample()
-            old_log_prob = action_distribution.log_prob(action_tensor)
-            value = critic(observation_tensor)
+            old_log_prob = action_distribution.log_prob(action_tensor) # Store log-prob of the action taken under the current policy
+            value = critic(observation_tensor)                         # Store value of the current state
 
+            # The action is passed to the environment to get the next observation and reward
             next_observation, reward, terminated, truncated, info = env.step(
                 action_tensor.item()
             )
@@ -120,6 +127,7 @@ def collect_rollout(env, actor, critic, observation, num_steps):
             next_observation_tensor = next_observation_tensor.unsqueeze(0)
             next_value = critic(next_observation_tensor)
 
+            # Store the transition data in lists for later processing
             states.append(observation_tensor.squeeze(0))
             actions.append(action_tensor.squeeze(0))
             rewards.append(reward)
@@ -136,6 +144,7 @@ def collect_rollout(env, actor, critic, observation, num_steps):
 
             observation = next_observation
 
+    # The rollout is returned as a dictionary of tensors, along with the current observation for the next rollout.
     rollout = {
         "states": torch.stack(states),
         "actions": torch.stack(actions),
@@ -149,7 +158,7 @@ def collect_rollout(env, actor, critic, observation, num_steps):
 
     return rollout, observation
 
-
+# Generalized Advantage Estimation (GAE) and lambda-return targets for the critic
 def compute_gae(rollout, gamma, gae_lambda):
 
     rewards = rollout["rewards"]
@@ -158,18 +167,22 @@ def compute_gae(rollout, gamma, gae_lambda):
     terminateds = rollout["terminateds"]
     truncateds = rollout["truncateds"]
 
+    # The number of steps in the rollout is determined by the length of the rewards tensor.
     num_steps = rewards.shape[0]
 
+    # Compute the Generalized Advantage Estimation (GAE) advantages and lambda-return targets for the critic.
     advantages = torch.zeros_like(rewards)
 
     # Advantage beyond the end of the rollout
     next_advantage = 0.0
 
+    # Loop backwards through the rollout to compute advantages using GAE
     for t in reversed(range(num_steps)):
 
         # Bootstrap only stops at a true terminal state
         bootstrap_mask = 1.0 - terminateds[t]
 
+        # Compute the temporal difference error (delta) for GAE
         delta = (
             rewards[t]
             + gamma * bootstrap_mask * next_values[t]
@@ -182,8 +195,10 @@ def compute_gae(rollout, gamma, gae_lambda):
             truncateds[t]
         )
 
+        # The continue_mask is 1.0 if the episode has not ended, and 0.0 if it has ended.
         continue_mask = 1.0 - episode_ended
 
+        # Compute the advantage at time step t using the GAE formula, which combines the temporal difference error with the discounted next advantage.
         advantage = (
             delta
             + gamma
@@ -192,14 +207,17 @@ def compute_gae(rollout, gamma, gae_lambda):
             * next_advantage
         )
 
+        # Store the computed advantage for time step t and update next_advantage for the next iteration of the loop.
         advantages[t] = advantage
         next_advantage = advantage
 
     # Lambda-return targets for the critic
     returns = advantages + values
 
+    # Return the computed advantages and lambda-return targets for use in PPO updates.
     return advantages, returns
 
+# Normalise advantages to have zero mean and unit variance
 def normalise_advantages(advantages):
 
     advantage_mean = advantages.mean()
@@ -213,6 +231,26 @@ def normalise_advantages(advantages):
 
     return normalised_advantages
 
+# Calculate the explained variance between what the critic predicts and the lambda-return targets
+def explained_variance(returns, values):
+
+    # Variance of the return targets
+    return_var = torch.var(returns, correction=0)  # Use population variance for explained variance
+
+    # Check for zero variance in returns to avoid division by zero
+    if return_var.item() == 0.0:
+        return float("nan")
+
+    # Variance of the critic prediction errors
+    prediction_error_var = torch.var(returns - values, correction=0)  # Use population variance for prediction error
+
+    # Explained variance formula
+    explained_variance = 1.0 - prediction_error_var / return_var
+
+    # Return the explained variance as a float
+    return explained_variance.item()
+
+# Compute the mean return of the current policy over several evaluation episodes
 def compute_ppo_losses(
     actor,
     critic,
@@ -284,7 +322,7 @@ def compute_ppo_losses(
 
     return results
 
-
+# Update the PPO policy and critic
 def update_ppo(
     actor,
     critic,
@@ -316,7 +354,7 @@ def update_ppo(
             minibatch_indices = indices[start:end]
 
             # Select the transitions corresponding to the minibatch indices
-            # old_log_probs remain the probabilities of the actions taken under the old policy, 
+            # old_log_probs remain the probabilities of the actions taken under the old policy,
             # which are fixed for the PPO ratio
             minibatch_rollout = {
                 "states": rollout["states"][minibatch_indices],
@@ -324,7 +362,7 @@ def update_ppo(
                 "old_log_probs": rollout["old_log_probs"][minibatch_indices]
             }
 
-            # Advantages and critic targets were calculated from the 
+            # Advantages and critic targets were calculated from the
             # original rollout and remain fixed for all PPO epochs
             minibatch_advantages = advantages[minibatch_indices]
             minibatch_returns = returns[minibatch_indices]
@@ -359,7 +397,7 @@ def update_ppo(
             torch.nn.utils.clip_grad_norm_(actor.parameters(), max_grad_norm)
             actor_optimizer.step()
 
-            # Update the critic 
+            # Update the critic
             critic_optimizer.zero_grad()
             critic_loss.backward()
 
@@ -552,15 +590,22 @@ def update_continuous_ppo(
     max_grad_norm
 ):
 
+    # Fetch the number of steps in the rollout, which is the first dimension of the states tensor.
     num_steps = rollout["states"].shape[0]
 
-    # Reuse the same rollout for several PPO epochs
+    # Create the clip-fraction list before the epoch loop
+    clip_fractions = []
+
+    # Reuse the same rollout for 10 PPO epochs
     for epoch in range(update_epochs):
+
+        # Create/reset the KL divergence list for each epoch, to track the approximate KL divergence between the old and new policies.
+        approx_kl_divs = []
 
         # Randomly shuffle the rollout indices at the start of each epoch to create minibatches
         indices = torch.randperm(num_steps)
 
-        # Split the rollout into minibatches
+        # Split the rollout into 32 minibatches
         for start in range(0, num_steps, minibatch_size):
 
             # Select a minibatch of rollout data
@@ -568,7 +613,7 @@ def update_continuous_ppo(
             minibatch_indices = indices[start:end]
 
             # Select the transitions corresponding to the minibatch indices
-            # old_log_probs remain the probabilities of the actions taken under the old policy, 
+            # old_log_probs remain the probabilities of the actions taken under the old policy,
             # which are fixed for the PPO ratio
             minibatch_rollout = {
                 "states": rollout["states"][minibatch_indices],
@@ -576,7 +621,7 @@ def update_continuous_ppo(
                 "old_log_probs": rollout["old_log_probs"][minibatch_indices]
             }
 
-            # Advantages and critic targets were calculated from the 
+            # Advantages and critic targets were calculated from the
             # original rollout and remain fixed for all PPO epochs
             minibatch_advantages = advantages[minibatch_indices]
             minibatch_returns = returns[minibatch_indices]
@@ -604,6 +649,23 @@ def update_continuous_ppo(
             # Critic is trained separately against the lambda-return targets, which are fixed
             critic_loss = results["value_loss"]
 
+            # Calculate the approximate KL divergence between the old and new policies
+            log_ratio = (results["new_log_probs"] - minibatch_rollout["old_log_probs"])
+
+            approx_kl = (
+                (torch.exp(log_ratio) - 1.0) - log_ratio
+            ).mean().item()
+
+            approx_kl_divs.append(approx_kl)
+
+            # Calculate the fraction of probability ratios outside the clipping interval
+            clip_fraction = (
+                (results["ratios"] < (1.0 - clip_epsilon))
+                | (results["ratios"] > (1.0 + clip_epsilon))
+            ).float().mean().item()
+
+            clip_fractions.append(clip_fraction)
+
             # Update the actor
             actor_optimizer.zero_grad()
             actor_loss.backward()
@@ -611,9 +673,19 @@ def update_continuous_ppo(
             torch.nn.utils.clip_grad_norm_(actor.parameters(), max_grad_norm)
             actor_optimizer.step()
 
-            # Update the critic 
+            # Update the critic
             critic_optimizer.zero_grad()
             critic_loss.backward()
 
             torch.nn.utils.clip_grad_norm_(critic.parameters(), max_grad_norm)
             critic_optimizer.step()
+
+    # Average KL over the final epoch and clip fraction over all epochs
+    mean_approx_kl = np.mean(approx_kl_divs)
+    mean_clip_fraction = np.mean(clip_fractions)
+
+    # Mean standard deviation of the current policy over all action dimensions
+    with torch.no_grad():
+        mean_policy_std = torch.exp(actor.log_std).mean().item()
+
+    return mean_approx_kl, mean_clip_fraction, mean_policy_std
