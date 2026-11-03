@@ -375,6 +375,29 @@ fig.legend(
     bbox_to_anchor=(0.5, -0.01)
 )
 
+# Highlight the first and last 50 PPO updates
+early_end = 50 * 2048 / 1_000_000
+late_start = (488 - 50) * 2048 / 1_000_000
+late_end = 488 * 2048 / 1_000_000
+
+for ax in axes:
+
+    ax.axvspan(
+        0,
+        early_end,
+        color="grey",
+        alpha=0.12,
+        zorder=0
+    )
+
+    ax.axvspan(
+        late_start,
+        late_end,
+        color="grey",
+        alpha=0.12,
+        zorder=0
+    )
+
 fig.tight_layout(
     rect=[0, 0.06, 1, 1]
 )
